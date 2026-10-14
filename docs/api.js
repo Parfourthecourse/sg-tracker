@@ -51,8 +51,8 @@ export async function saveProfile(patch) {
 async function pushProfile() {
   const p = await store.get('profile');
   if (!p || !(await store.get('profile_dirty'))) return;
-  const { id, display_name, handicap_index, home_course_id, default_baseline, share_leaderboard, bag } = p;
-  const { error } = await supabase.from('profiles').upsert({ id, display_name, handicap_index, home_course_id, default_baseline, share_leaderboard, bag });
+  const { id, display_name, handicap_index, home_course_id, default_baseline, share_leaderboard, bag, tee_club } = p;
+  const { error } = await supabase.from('profiles').upsert({ id, display_name, handicap_index, home_course_id, default_baseline, share_leaderboard, bag, tee_club: tee_club ?? 'Dr' });
   if (!error) await store.set('profile_dirty', false);
 }
 
@@ -131,10 +131,10 @@ async function pushRound(r, userId) {
   const { error } = await supabase.from('rounds').upsert({
     id: r.id, user_id: userId, course_id: r.course_id ?? null, course_name: r.course_name,
     tee_set: r.tee_set, played_on: r.played_on, holes_played: r.holes_played, status: r.status,
-    entry_mode: r.entry_mode, notes: r.notes ?? null,
+    entry_mode: r.entry_mode, notes: r.notes ?? null, current_hole: r.current_hole ?? null,
   });
   if (error) throw error;
-  const holes = Object.entries(r.holes).map(([n, h]) => ({ round_id: r.id, hole_no: +n, par: h.par, yards: h.yards }));
+  const holes = Object.entries(r.holes).map(([n, h]) => ({ round_id: r.id, hole_no: +n, par: h.par, yards: h.yards, holed: !!r.holes_done?.[n] }));
   if (holes.length) { const { error: e } = await supabase.from('round_holes').upsert(holes); if (e) throw e; }
   if (r.conditions?.length) {
     const rows = r.conditions.map((c) => ({ ...c, round_id: r.id }));
@@ -172,12 +172,14 @@ async function pullRounds(userId) {
   for (const row of data) {
     const existing = local.get(row.id);
     if (existing?.dirty) continue; // never clobber unsynced local work
-    const holes = {};
-    for (const h of row.round_holes) holes[h.hole_no] = { par: h.par, yards: h.yards };
+    if (existing && existing.updated_at && row.updated_at && existing.updated_at > row.updated_at) continue;
+    const holes = {}, holes_done = {};
+    for (const h of row.round_holes) { holes[h.hole_no] = { par: h.par, yards: h.yards }; if (h.holed) holes_done[h.hole_no] = true; }
     await store.putRound({
       id: row.id, course_id: row.course_id, course_name: row.course_name, tee_set: row.tee_set,
       played_on: row.played_on, holes_played: row.holes_played, status: row.status, entry_mode: row.entry_mode,
-      notes: row.notes, created_at: row.created_at, updated_at: row.updated_at, holes,
+      notes: row.notes, created_at: row.created_at, updated_at: row.updated_at, holes, holes_done,
+      current_hole: row.current_hole ?? existing?.current_hole ?? 1,
       conditions: row.round_conditions.map(({ round_id, created_at, ...c }) => c),
       shots: row.shots.map(({ round_id, created_at, updated_at, ...s }) => ({ ...s, distance: +s.distance })),
       dirty: false,

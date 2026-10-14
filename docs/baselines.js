@@ -57,21 +57,50 @@ export const PGA_TOUR = {
   },
 };
 
-// Broadie's 90-golfer putting table; long game uses his linear tee fit
-// J_tee(d) = 2.79 + 0.0066 d (2011 working paper) and is only a placeholder
-// until a personal baseline exists. Marked partial so the UI can say so.
-export const GOLFER_90 = {
-  id: 'golfer_90',
-  name: '90-golfer (putting only)',
-  partial: true,
-  source: 'https://golfingfocus.com/what-percentage-of-putts-do-pros-make-tv-does-not-tell-the-story/',
-  lies: {
-    green: [
-      [1, 1.01], [2, 1.06], [3, 1.17], [4, 1.36], [5, 1.51], [6, 1.62], [7, 1.69],
-      [8, 1.75], [9, 1.79], [10, 1.82], [15, 1.94], [20, 2.02], [30, 2.16], [40, 2.30],
-      [50, 2.41], [60, 2.51],
-    ],
-  },
-};
+// Broadie's 90-golfer putting table (Every Shot Counts), used to shape the putting gap below.
+const GOLFER_90_GREEN = [
+  [1, 1.01], [2, 1.06], [3, 1.17], [4, 1.36], [5, 1.51], [6, 1.62], [7, 1.69],
+  [8, 1.75], [9, 1.79], [10, 1.82], [15, 1.94], [20, 2.02], [30, 2.16], [40, 2.30],
+  [50, 2.41], [60, 2.51], [90, 2.75],
+];
 
-export const BASELINES = { pga_tour: PGA_TOUR, golfer_90: GOLFER_90 };
+// ---- Estimated handicap baselines ----------------------------------------------------
+// No complete amateur expected-strokes tables are published, so these are PROJECTIONS:
+// expected_h(lie, d) = tour(lie, d) + (h / 18) * gap18(lie, d)
+// where gap18 is the extra strokes an ~18-handicap (Broadie's "90-golfer") needs from each
+// position. Anchors: Broadie's 90-golfer tee fit 2.79 + 0.0066d vs pro 2.38 + 0.0041d
+// (gap 0.41 + 0.0025d), his 90-golfer putting table, and Pinpoint's 15-handicap spot values
+// (fairway 160 yd 3.92, sand 20 yd 3.05). Sanity check: a 15-handicap on a 400-yd par 4
+// projects to 5.17 strokes, i.e. about +21 per round versus Tour, matching Shot Scope's
+// measured gap. Treat the category split as approximate; the totals are what is anchored.
+function lerp(col, d) {
+  if (d <= col[0][0]) return col[0][1];
+  for (let i = 1; i < col.length; i++) if (d <= col[i][0]) {
+    const [d0, v0] = col[i - 1], [d1, v1] = col[i];
+    return v0 + ((d - d0) / (d1 - d0)) * (v1 - v0);
+  }
+  return col[col.length - 1][1];
+}
+const GAP18 = {
+  tee: (d) => 0.41 + 0.0025 * d,
+  fairway: (d) => 0.19 + 0.00587 * Math.min(d, 220) + 0.002 * Math.max(0, d - 220),
+  rough: (d) => (0.19 + 0.00587 * Math.min(d, 220) + 0.002 * Math.max(0, d - 220)) * 1.15,
+  sand: (d) => 0.5 + 0.004 * d,
+  recovery: (d) => (0.19 + 0.00587 * Math.min(d, 220) + 0.002 * Math.max(0, d - 220)) * 1.1,
+  green: (ft) => lerp(GOLFER_90_GREEN, ft) - lerp(PGA_TOUR.lies.green, ft),
+};
+function projectBaseline(h) {
+  const lies = {};
+  for (const [lie, col] of Object.entries(PGA_TOUR.lies)) {
+    lies[lie] = col.map(([d, v]) => [d, Math.round((v + (h / 18) * GAP18[lie](d)) * 1000) / 1000]);
+  }
+  return {
+    id: `hcp_${h}`, name: `Est. ${h} handicap`, estimated: true,
+    source: 'Projected from the PGA Tour table using Broadie 90-golfer gaps scaled by handicap',
+    lies,
+  };
+}
+
+export const HANDICAP_BASELINES = Object.fromEntries([5, 10, 15, 20, 25].map((h) => [`hcp_${h}`, projectBaseline(h)]));
+
+export const BASELINES = { pga_tour: PGA_TOUR, ...HANDICAP_BASELINES };

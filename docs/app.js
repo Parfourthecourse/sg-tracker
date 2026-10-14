@@ -220,31 +220,54 @@ function condSummary(c) {
 }
 
 // ---------- shot entry ----------
+const DEFAULT_BAG = [['Dr', 230], ['3w', 215], ['5w', 200], ['Hy', 190], ['4i', 180], ['5i', 170], ['6i', 160], ['7i', 150], ['8i', 140], ['9i', 130], ['PW', 120], ['GW', 105], ['SW', 90], ['LW', 70], ['Putter', null]];
+/** Bag is stored as [{club, yards}]; older profiles stored plain strings. */
+function normBag(bag) {
+  if (!Array.isArray(bag) || !bag.length) return DEFAULT_BAG.map(([club, yards]) => ({ club, yards }));
+  return bag.map((b) => (typeof b === 'string' ? { club: b, yards: null } : { club: b.club, yards: b.yards ?? null }));
+}
+function clubForDistance(bag, yards) {
+  const cands = bag.filter((b) => b.yards && b.club !== 'Putter');
+  if (!cands.length || !yards) return null;
+  // Pick the shortest club that still reaches; if none reaches, the longest club.
+  const reaching = cands.filter((b) => b.yards >= yards).sort((a, b) => a.yards - b.yards);
+  return (reaching[0] ?? cands.sort((a, b) => b.yards - a.yards)[0]).club;
+}
+const nextHoleNeedingData = (r) => { for (let h = 1; h <= r.holes_played; h++) if (!r.holes_done?.[h]) return h; return r.holes_played; };
+
 route('/round/:id', async ({ id }) => {
   const r = await store.getRound(id);
   if (!r) { location.hash = '#/'; return; }
   const profile = await api.loadProfile();
-  const bag = profile?.bag ?? ['Dr', '3w', '5w', 'Hy', '4i', '5i', '6i', '7i', '8i', '9i', 'PW', 'GW', 'SW', 'LW', 'Putter'];
+  const bag = normBag(profile?.bag);
+  const teeClub = profile?.tee_club ?? 'Dr';
   const baseline = getBaseline(profile?.default_baseline);
-  let hole = r.current_hole ?? 1;
-  let editing = null; // shot id being edited, else null = new shot
+  let hole = (r.current_hole && !r.holes_done?.[r.current_hole]) ? r.current_hole : nextHoleNeedingData(r);
+  let editing = null;        // shot id being edited; null = entering a new shot
+  let showYardage = false;   // tee shot: keypad hidden until "Change" is tapped
   chrome({ title: esc(r.course_name), back: true });
 
   const shotsOn = (h) => r.shots.filter((s) => s.hole_no === h).sort((a, b) => a.shot_no - b.shot_no);
+  const strokesOn = (h) => shotsOn(h).reduce((n, s) => n + 1 + (s.penalty_strokes ?? 0), 0);
 
   function blank() {
     const prev = shotsOn(hole);
     const last = prev[prev.length - 1];
-    const s = { id: uuid(), hole_no: hole, shot_no: prev.length + 1, lie: 'tee', distance: r.holes[hole].yards, club: null, miss: 'none', penalty_strokes: 0, penalty_type: null, within_30: null, notes: null };
-    if (last) {
-      s.lie = guessLie(last); s.distance = 0;
-      if (s.lie === 'green') s.club = 'Putter';
+    const par = r.holes[hole].par;
+    const s = { id: uuid(), hole_no: hole, shot_no: strokesOn(hole) + 1, lie: 'tee', distance: r.holes[hole].yards, club: null, miss: 'none', penalty_strokes: 0, penalty_type: null, within_30: null, notes: null, _auto: true };
+    if (!last) {
+      s.club = par >= 4 ? teeClub : clubForDistance(bag, s.distance) ?? teeClub;
+      return s;
     }
+    if (last.penalty_type === 'ob' || last.penalty_type === 'lost') {   // stroke and distance: replay from the same spot
+      s.lie = last.lie; s.distance = last.distance; s.club = last.club; s._auto = false; return s;
+    }
+    s.lie = guessLie(last); s.distance = 0;
+    s.club = s.lie === 'green' ? 'Putter' : null;
     return s;
   }
   function guessLie(last) {
-    if (last.lie === 'green') return 'green';
-    if (last.lie === 'green' || /^(Putter)$/.test(last.club ?? '')) return 'green';
+    if (last.lie === 'green' || last.club === 'Putter') return 'green';
     if (/^(LW|SW|GW|PW)$/.test(last.club ?? '') || (last.distance <= 60 && last.lie !== 'tee')) return 'green';
     return 'fairway';
   }
@@ -255,44 +278,52 @@ route('/round/:id', async ({ id }) => {
   function draw() {
     const prev = shotsOn(hole);
     const h = r.holes[hole];
+    const done = !!r.holes_done?.[hole];
     const cond = conditionsFor(r, hole);
+    const last = editing ? prev[prev.findIndex((p) => p.id === editing) - 1] : prev[prev.length - 1];
+    const isTee = s.shot_no === 1 || (s.lie === 'tee' && !editing && last?.penalty_type && (last.penalty_type === 'ob' || last.penalty_type === 'lost') && last.lie === 'tee');
     const unit = s.lie === 'green' ? 'ft' : 'yds';
-    const showMiss = s.shot_no > 1 || h.par === 3;
+    const nineWay = s.lie === 'green' || (s.lie === 'recovery' && s.distance <= 50);
+    const missOpts = nineWay ? MISSES : [['left', '← Left'], ['none', 'Centre'], ['right', 'Right →']];
+    const viewing = done && !editing;   // completed hole, nothing being edited: show the holed shot, no "new"
     render(`
-      <div class="hole-head"><div><span class="big">Hole ${hole}</span> <span class="muted">par ${h.par} · ${h.yards} yds</span></div>
+      <div class="hole-head"><div><span class="big">Hole ${hole}</span> <span class="muted">par ${h.par} · ${h.yards} yds${done ? ` · <b>${strokesOn(hole)}</b> (${strokesOn(hole) - h.par === 0 ? 'E' : fmt(strokesOn(hole) - h.par, 0)})` : ''}</span></div>
         <div class="row"><button class="icon-btn" id="prevh" ${hole === 1 ? 'disabled' : ''}>&#8249;</button><button class="icon-btn" id="nexth" ${hole === r.holes_played ? 'disabled' : ''}>&#8250;</button></div></div>
       <div class="row"><a class="cond-chip" href="#/round/${id}/conditions">☁ ${esc(condSummary(cond))}</a></div>
-      <div class="shot-strip">${prev.map((p) => `<button class="shot-chip ${editing === p.id ? 'active' : ''}" data-edit="${p.id}">${p.shot_no}. ${LIE_LABELS[p.lie]} ${p.distance}${p.lie === 'green' ? 'ft' : ''}${p.club ? ' · ' + esc(p.club) : ''}${p.penalty_strokes ? ' ⚠' : ''}</button>`).join('')}<button class="shot-chip ${editing ? '' : 'active'}" data-edit="">${editing ? '+ new' : `${s.shot_no}. new`}</button></div>
+      <div class="shot-strip">${prev.map((p) => `<button class="shot-chip ${editing === p.id ? 'active' : ''}" data-edit="${p.id}">${p.shot_no}. ${LIE_LABELS[p.lie]} ${p.distance}${p.lie === 'green' ? 'ft' : ''}${p.club ? ' · ' + esc(p.club) : ''}${p.penalty_strokes ? ' ⚠' : ''}</button>`).join('')}${done ? `<span class="shot-chip">⛳ holed</span>` : `<button class="shot-chip ${editing ? '' : 'active'}" data-edit="">${editing ? '+ new' : `${s.shot_no}. new`}</button>`}</div>
+      ${viewing ? `<div class="card"><p class="muted" style="margin:0 0 10px">Hole complete. Tap a shot above to edit it, or add a shot if one was missed.</p><button class="block" id="reopen">Add a shot to this hole</button></div>` : `
       <div class="card">
-        <label>Lie before shot ${s.shot_no}</label>
-        <div class="grid c3 lie-grid">${Object.entries(LIE_LABELS).map(([k, v]) => `<button data-lie="${k}" class="${s.lie === k ? 'sel' : ''}">${v}</button>`).join('')}</div>
+        ${last && !isTee ? `<label>Result of shot ${last.shot_no} (miss direction)</label><div class="miss-grid ${nineWay ? '' : 'three'}">${missOpts.map(([k, v]) => `<button data-miss="${k}" class="${(last.miss ?? 'none') === k ? 'sel' : ''}">${v}</button>`).join('')}</div>` : ''}
+        ${isTee ? `<label>Shot ${s.shot_no} · tee</label>` : `<label>Lie before shot ${s.shot_no}</label>
+        <div class="grid c3 lie-grid">${Object.entries(LIE_LABELS).filter(([k]) => k !== 'tee').map(([k, v]) => `<button data-lie="${k}" class="${s.lie === k ? 'sel' : ''}">${v}</button>`).join('')}</div>`}
         <label>Distance to hole</label>
+        ${isTee && !showYardage ? `<div class="row"><div class="dist-display grow">${s.distance}<small>yds</small></div><button id="chg">Change</button></div>` : `
         <div class="dist-display">${s.distance}<small>${unit}</small></div>
         <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, '−10', 0, '+10'].map((k) => `<button data-key="${k}">${k}</button>`).join('')}</div>
-        <div class="grid c2" style="margin-top:8px"><button data-key="C">Clear</button><button data-key="−1">−1</button></div>
-        <label>Club</label>
-        <div class="club-row">${bag.map((c) => `<button data-club="${esc(c)}" class="${s.club === c ? 'sel' : ''}">${esc(c)}</button>`).join('')}</div>
-        ${showMiss ? `<label>Result of previous shot (miss direction)</label><div class="miss-grid">${MISSES.map(([k, v]) => `<button data-miss="${k}" class="${(prev[prev.length - 1]?.miss ?? 'none') === k ? 'sel' : ''}">${v}</button>`).join('')}</div>` : ''}
-        <details ${s.penalty_strokes || s.notes || s.within_30 != null ? 'open' : ''}><summary>More: penalty, around-the-green flag, notes</summary>
-          <label>Penalty on this shot</label>
-          <div class="grid c4">${[['0', 'None'], ['water', 'Water'], ['lost', 'Lost'], ['ob', 'OB']].map(([k, v]) => `<button data-pen="${k}" class="${(s.penalty_type ?? '0') === k ? 'sel' : ''}">${v}</button>`).join('')}</div>
+        <div class="grid c2" style="margin-top:8px"><button data-key="C">Clear</button><button data-key="−1">−1</button></div>`}
+        <label>Penalty on this shot</label>
+        <div class="grid c5">${[['0', 'None'], ['water', 'Water'], ['lost', 'Lost'], ['ob', 'OB'], ['unplayable', 'Unplay.']].map(([k, v]) => `<button data-pen="${k}" class="${(s.penalty_type ?? '0') === k ? 'sel' : ''}">${v}</button>`).join('')}</div>
+        <details ${s.notes || s.within_30 != null ? 'open' : ''}><summary>More: around-the-green flag, notes</summary>
           <label>Within 30 yards of the green?</label>
           <div class="grid c3">${[['auto', 'Auto'], ['yes', 'Yes'], ['no', 'No']].map(([k, v]) => `<button data-w30="${k}" class="${(s.within_30 == null ? 'auto' : s.within_30 ? 'yes' : 'no') === k ? 'sel' : ''}">${v}</button>`).join('')}</div>
           <label>Notes</label><input id="snotes" value="${esc(s.notes ?? '')}" placeholder="optional">
         </details>
+        <label>Club</label>
+        <div class="club-row">${bag.map((b) => `<button data-club="${esc(b.club)}" class="${s.club === b.club ? 'sel' : ''}">${esc(b.club)}</button>`).join('')}</div>
       </div>
       <div class="sticky-actions">
         ${editing ? `<button class="danger" id="del">Delete</button><button class="primary grow" id="save">Save shot</button>` :
-          `<button class="primary grow" id="save">Next shot</button><button class="grow" id="holed" ${prev.length === 0 && s.distance === r.holes[hole].yards ? '' : ''}>Holed ⛳</button>`}
-      </div>`);
-    const miss = view.querySelector('.miss-grid');
+          `<button class="primary grow" id="save">Next shot</button><button class="grow" id="holed">Holed ⛳</button>`}
+      </div>`}`);
     view.onclick = async (e) => {
       const b = e.target.closest('button'); if (!b) return;
-      if (b.dataset.edit !== undefined) { editing = b.dataset.edit || null; s = editing ? { ...prev.find((p) => p.id === editing) } : blank(); keyBuf = ''; draw(); return; }
-      if (b.dataset.lie) { const wasGreen = s.lie === 'green'; s.lie = b.dataset.lie; if (s.lie === 'green' && !wasGreen) { s.club = 'Putter'; s.distance = 0; } if (wasGreen && s.lie !== 'green') { s.club = null; s.distance = 0; } keyBuf = ''; draw(); return; }
+      if (b.dataset.edit !== undefined) { editing = b.dataset.edit || null; s = editing ? { ...prev.find((p) => p.id === editing), _auto: false } : blank(); keyBuf = ''; showYardage = false; draw(); return; }
+      if (b.id === 'reopen') { delete r.holes_done[hole]; await api.saveRoundLocal(r); s = blank(); draw(); return; }
+      if (b.id === 'chg') { showYardage = true; keyBuf = String(s.distance); draw(); return; }
+      if (b.dataset.lie) { const wasGreen = s.lie === 'green'; s.lie = b.dataset.lie; if (s.lie === 'green' && !wasGreen) { s.club = 'Putter'; s.distance = 0; s._auto = true; } if (wasGreen && s.lie !== 'green') { s.club = null; s.distance = 0; s._auto = true; } keyBuf = ''; draw(); return; }
       if (b.dataset.key !== undefined) { keypad(b.dataset.key); return; }
-      if (b.dataset.club) { s.club = s.club === b.dataset.club ? null : b.dataset.club; draw(); return; }
-      if (b.dataset.miss) { const last = prev[prev.length - 1]; if (last) { last.miss = b.dataset.miss; await api.saveRoundLocal(r); } draw(); return; }
+      if (b.dataset.club) { s.club = s.club === b.dataset.club ? null : b.dataset.club; s._auto = false; draw(); return; }
+      if (b.dataset.miss) { if (last) { last.miss = b.dataset.miss; await api.saveRoundLocal(r); } draw(); return; }
       if (b.dataset.pen) { if (b.dataset.pen === '0') { s.penalty_strokes = 0; s.penalty_type = null; } else { s.penalty_strokes = 1; s.penalty_type = b.dataset.pen; } draw(); return; }
       if (b.dataset.w30) { s.within_30 = b.dataset.w30 === 'auto' ? null : b.dataset.w30 === 'yes'; draw(); return; }
       if (b.id === 'prevh') { await gotoHole(hole - 1); return; }
@@ -301,7 +332,7 @@ route('/round/:id', async ({ id }) => {
       if (b.id === 'holed') { await commit(true); return; }
       if (b.id === 'del') { r.shots = r.shots.filter((p) => p.id !== editing); renumber(); (r.deleted_shot_ids ??= []).push(editing); editing = null; s = blank(); await api.saveRoundLocal(r); draw(); return; }
     };
-    $('#snotes').onchange = (e) => { s.notes = e.target.value || null; };
+    const notes = $('#snotes'); if (notes) notes.onchange = (e) => { s.notes = e.target.value || null; };
   }
   function keypad(k) {
     if (k === 'C') { keyBuf = ''; s.distance = 0; }
@@ -311,26 +342,34 @@ route('/round/:id', async ({ id }) => {
     else { keyBuf = (keyBuf + k).slice(0, 3); s.distance = +keyBuf; }
     if (k === '+10' || k.startsWith('−')) keyBuf = String(s.distance);
     $('.dist-display').innerHTML = `${s.distance}<small>${s.lie === 'green' ? 'ft' : 'yds'}</small>`;
-  }
-  function renumber() { for (const h of Object.keys(r.holes)) shotsOn(+h).forEach((p, i) => { p.shot_no = i + 1; }); }
-  async function commit(holed) {
-    if (s.distance <= 0 && !(s.shot_no === 1)) { toast('Enter the distance to the hole'); return; }
-    s.notes = $('#snotes').value || null;
-    if (editing) { Object.assign(r.shots.find((p) => p.id === editing), s); editing = null; }
-    else r.shots.push({ ...s });
-    if (holed) {
-      r.holes_done = { ...(r.holes_done ?? {}), [hole]: true };
-      await api.saveRoundLocal(r);
-      const res = scoreHole(shotsOn(hole), r.holes[hole].par, baseline);
-      toast(`Hole ${hole}: ${res.strokes} (${fmt(res.strokes - r.holes[hole].par, 0)}) · SG ${fmt(res.totals.total)}`);
-      if (hole < r.holes_played) await gotoHole(hole + 1);
-      else { location.hash = `#/round/${id}/summary`; return; }
-    } else {
-      await api.saveRoundLocal(r);
-      s = blank(); keyBuf = ''; draw();
+    // Suggest a club from stock yardages while the golfer has not picked one by hand.
+    if (s._auto && s.lie !== 'green') {
+      const c = clubForDistance(bag, s.distance);
+      if (c && c !== s.club) { s.club = c; for (const x of view.querySelectorAll('button[data-club]')) x.classList.toggle('sel', x.dataset.club === c); }
     }
   }
-  async function gotoHole(h) { hole = h; r.current_hole = h; editing = null; s = blank(); keyBuf = ''; await api.saveRoundLocal(r); draw(); }
+  function renumber() {
+    for (const h of Object.keys(r.holes)) { let n = 1; for (const p of shotsOn(+h)) { p.shot_no = n; n += 1 + (p.penalty_strokes ?? 0); } }
+  }
+  async function commit(holed) {
+    if (s.distance <= 0) { toast('Enter the distance to the hole'); return; }
+    const notes = $('#snotes'); if (notes) s.notes = notes.value || null;
+    const { _auto, ...clean } = s;
+    if (editing) { Object.assign(r.shots.find((p) => p.id === editing), clean); editing = null; renumber(); }
+    else r.shots.push(clean);
+    if (holed) {
+      r.holes_done = { ...(r.holes_done ?? {}), [hole]: true };
+      const res = scoreHole(shotsOn(hole), r.holes[hole].par, baseline);
+      toast(`Hole ${hole}: ${res.strokes} (${res.strokes - r.holes[hole].par === 0 ? 'E' : fmt(res.strokes - r.holes[hole].par, 0)}) · SG ${fmt(res.totals.total)}`);
+      const next = nextHoleNeedingData(r);
+      if (Object.keys(r.holes_done).length >= r.holes_played) { r.current_hole = hole; await api.saveRoundLocal(r); location.hash = `#/round/${id}/summary`; return; }
+      await gotoHole(next);
+    } else {
+      await api.saveRoundLocal(r);
+      s = blank(); keyBuf = ''; showYardage = false; draw();
+    }
+  }
+  async function gotoHole(h) { hole = h; r.current_hole = h; editing = null; s = blank(); keyBuf = ''; showYardage = false; await api.saveRoundLocal(r); draw(); }
   draw();
 });
 
@@ -357,13 +396,13 @@ route('/round/:id/summary', async ({ id }) => {
         <div class="cat-bars" style="margin-top:10px">
           ${bar('Off the tee', res.totals.ott, 'var(--ott)')}${bar('Approach', res.totals.app, 'var(--app)')}${bar('Around green', res.totals.arg, 'var(--arg)')}${bar('Putting', res.totals.putt, 'var(--putt)')}
           <div class="cat-bar"><b>Total</b><div></div><b class="num ${cls(res.totals.total)}" style="text-align:right">${fmt(res.totals.total)}</b></div>
-        </div>${baseline.partial ? '<p class="muted">This baseline only covers putting; other categories use the Tour table.</p>' : ''}</div>
+        </div>${baseline.estimated ? '<p class="muted">Estimated baseline: projected from the Tour table using published amateur gaps. Totals are anchored; the category split is approximate.</p>' : ''}</div>
       <div class="card"><h3 style="margin-top:0">Holes</h3><table><tr><th>#</th><th>Par</th><th>Score</th><th>OTT</th><th>APP</th><th>ARG</th><th>PUTT</th><th>SG</th></tr>
         ${done.map((h) => { const x = res.holes[h]; return `<tr><td>${h}</td><td>${x.par}</td><td>${x.strokes}</td><td class="num ${cls(x.totals.ott)}">${fmt(x.totals.ott)}</td><td class="num ${cls(x.totals.app)}">${fmt(x.totals.app)}</td><td class="num ${cls(x.totals.arg)}">${fmt(x.totals.arg)}</td><td class="num ${cls(x.totals.putt)}">${fmt(x.totals.putt)}</td><td class="num ${cls(x.totals.total)}"><b>${fmt(x.totals.total)}</b></td></tr>`; }).join('')}</table></div>
       <div class="card"><h3 style="margin-top:0">Best shots</h3>${best.map(shotLine).join('')}<h3>Worst shots</h3>${worst.map(shotLine).join('')}</div>
       <div class="grid c2">${r.status === 'in_progress' ? `<a class="btn" href="#/round/${id}" style="display:flex;align-items:center;justify-content:center;text-decoration:none">Back to entry</a><button class="primary" id="finish">Finish round</button>` : `<a class="btn" href="#/round/${id}" style="display:flex;align-items:center;justify-content:center;text-decoration:none">Edit shots</a><button class="danger" id="delete">Delete round</button>`}</div>`);
     $('#bl').onchange = (e) => { baselineId = e.target.value; draw(); };
-    $('#finish')?.addEventListener('click', async () => { r.status = 'complete'; await api.saveRoundLocal(r); draw(); toast('Round saved'); });
+    $('#finish')?.addEventListener('click', async () => { r.status = 'complete'; await api.saveRoundLocal(r); toast('Round saved'); location.hash = '#/'; });
     $('#delete')?.addEventListener('click', async () => { if (confirm('Delete this round?')) { await api.deleteRound(id); location.hash = '#/'; } });
   };
   const shotLine = (s) => `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)"><span class="grow">H${s.hole} · shot ${s.shot_no} · ${LIE_LABELS[s.lie]} ${s.distance}${s.lie === 'green' ? ' ft' : ' yds'}${s.club ? ' · ' + esc(s.club) : ''}${s.penalty_strokes ? ' · penalty' : ''}</span><b class="num ${cls(s.sg)}">${fmt(s.sg)}</b></div>`;
@@ -411,22 +450,30 @@ route('/settings', async () => {
   chrome({ title: 'Settings', tab: 'settings' });
   const profile = (await api.loadProfile()) ?? {};
   const courses = await store.allCourses();
-  const bag = (profile.bag ?? []).join(', ');
+  const bag = normBag(profile.bag);
+  const teeClub = profile.tee_club ?? 'Dr';
   render(`<div class="card">
     <label>Display name</label><input id="dn" value="${esc(profile.display_name ?? '')}">
     <label>Handicap index</label><input id="hc" inputmode="decimal" value="${profile.handicap_index ?? ''}">
     <label>Home course</label><select id="hc-course"><option value="">—</option>${courses.map((c) => `<option value="${c.id}" ${c.id === profile.home_course_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
     <label>Default baseline</label><select id="bl">${Object.values(BASELINES).map((b) => `<option value="${b.id}" ${b.id === (profile.default_baseline ?? 'pga_tour') ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
-    <label>Bag (comma separated, in the order you want on the entry screen)</label><input id="bag" value="${esc(bag)}">
+    <label>Preferred club off the tee on par 4s and 5s</label><select id="teeclub">${bag.map((b) => `<option ${b.club === teeClub ? 'selected' : ''}>${esc(b.club)}</option>`).join('')}</select>
+    <label>Bag and stock yardages (order is the order on the entry screen; yardage picks the default club for approach and par-3 tee shots)</label>
+    <table id="bagtbl"><tr><th>Club</th><th>Yards</th><th></th></tr>${bag.map((b, i) => `<tr><td><input class="bclub" value="${esc(b.club)}"></td><td><input class="byds num" inputmode="numeric" value="${b.yards ?? ''}" style="width:72px;text-align:right"></td><td><button class="icon-btn bdel" data-i="${i}" title="Remove" style="font-size:20px">×</button></td></tr>`).join('')}</table>
+    <button id="bagadd" class="block">Add club</button>
     <label>Share my round totals on friends leaderboards</label><button id="share" class="block ${profile.share_leaderboard ? 'sel' : ''}">${profile.share_leaderboard ? 'Sharing' : 'Not sharing'}</button>
     <button class="primary block" id="save" style="margin-top:12px">Save</button>
   </div>
   <div class="card"><h3 style="margin-top:0">Sync</h3><p class="muted" id="syncinfo"></p><div class="grid c2"><button id="syncnow">Sync now</button><button id="export">Export CSV</button></div></div>
   <div class="card"><button class="danger block" id="out">Sign out</button><p class="muted" style="text-align:center">v${APP_VERSION}</p></div>`);
   let share = !!profile.share_leaderboard;
+  $('#bagtbl').onclick = (e) => { const b = e.target.closest('.bdel'); if (b) b.closest('tr').remove(); };
+  $('#bagadd').onclick = () => { const tr = document.createElement('tr'); tr.innerHTML = '<td><input class="bclub" placeholder="e.g. 2i"></td><td><input class="byds num" inputmode="numeric" style="width:72px;text-align:right"></td><td><button class="icon-btn bdel" style="font-size:20px">×</button></td>'; $('#bagtbl').appendChild(tr); };
   $('#share').onclick = () => { share = !share; $('#share').textContent = share ? 'Sharing' : 'Not sharing'; $('#share').classList.toggle('sel', share); };
   $('#save').onclick = async () => {
-    await api.saveProfile({ display_name: $('#dn').value.trim(), handicap_index: $('#hc').value === '' ? null : +$('#hc').value, home_course_id: $('#hc-course').value || null, default_baseline: $('#bl').value, bag: $('#bag').value.split(',').map((x) => x.trim()).filter(Boolean), share_leaderboard: share });
+    const rows = [...$('#bagtbl').querySelectorAll('tr')].slice(1);
+    const newBag = rows.map((tr) => ({ club: tr.querySelector('.bclub').value.trim(), yards: tr.querySelector('.byds').value === '' ? null : +tr.querySelector('.byds').value })).filter((b) => b.club);
+    await api.saveProfile({ display_name: $('#dn').value.trim(), handicap_index: $('#hc').value === '' ? null : +$('#hc').value, home_course_id: $('#hc-course').value || null, default_baseline: $('#bl').value, bag: newBag, tee_club: $('#teeclub').value, share_leaderboard: share });
     toast('Saved');
   };
   const info = async () => { const p = await api.countPending(); $('#syncinfo').textContent = `${p} round(s) waiting to sync. ${api.syncState.lastSync ? 'Last sync ' + api.syncState.lastSync.toLocaleTimeString() : ''} ${api.syncState.lastError ? 'Error: ' + api.syncState.lastError : ''} ${navigator.onLine ? '' : 'Offline.'}`; };

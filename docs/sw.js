@@ -1,5 +1,5 @@
 // Service worker: cache the app shell (and the Supabase client module) so the app opens with no signal.
-const CACHE = 'sg-tracker-v1';
+const CACHE = 'sg-tracker-v2';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './api.js', './store.js', './sg.js', './baselines.js', './config.js', './manifest.json', './icon.svg',
   './vendor/supabase.js'];
 self.addEventListener('install', (e) => {

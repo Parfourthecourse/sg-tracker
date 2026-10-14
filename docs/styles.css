@@ -50,6 +50,7 @@ textarea { padding: 10px 12px; min-height: 72px; }
 label { display: block; font-size: 13px; color: var(--ink-2); margin: 10px 0 4px; font-weight: 600; }
 .grid { display: grid; gap: 8px; }
 .grid.c2 { grid-template-columns: 1fr 1fr; } .grid.c3 { grid-template-columns: repeat(3, 1fr); } .grid.c4 { grid-template-columns: repeat(4, 1fr); }
+.grid.c5 { grid-template-columns: repeat(5, 1fr); }
 .grid.c6 { grid-template-columns: repeat(6, 1fr); }
 .grid.c9 { grid-template-columns: repeat(9, 1fr); }
 .list a { display: flex; justify-content: space-between; align-items: center; padding: 14px; text-decoration: none; color: inherit; border-bottom: 1px solid var(--line); }
@@ -74,6 +75,9 @@ label { display: block; font-size: 13px; color: var(--ink-2); margin: 10px 0 4px
 .club-row button { flex: 0 0 auto; min-width: 48px; padding: 0 10px; }
 .miss-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; max-width: 220px; margin: 0 auto; }
 .miss-grid button { min-height: 44px; font-size: 13px; }
+.miss-grid.three { max-width: none; }
+.grid.c5 button { padding: 0 4px; font-size: 13px; }
+#bagtbl input { min-height: 40px; }
 details summary { cursor: pointer; font-weight: 600; color: var(--ink-2); padding: 8px 0; }
 .sticky-actions { position: sticky; bottom: calc(var(--tap) + 8px); display: flex; gap: 8px; padding-top: 8px; background: linear-gradient(transparent, var(--bg) 30%); }
 

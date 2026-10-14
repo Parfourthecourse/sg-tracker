@@ -2,4 +2,4 @@
 // in Postgres is what protects the data, not this key.
 export const SUPABASE_URL = 'https://umpdekfouxqqjgwnvaea.supabase.co';
 export const SUPABASE_ANON_KEY = 'sb_publishable_laisFSXJfgpugxk4duC46g_p6h6zBKF';
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';
